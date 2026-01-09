@@ -5,6 +5,7 @@ const gridSlider = document.getElementById('gridSlider');
 const scaleSlider = document.getElementById('scaleSlider');
 const colorSlider = document.getElementById('colorSlider');
 const aspectRatioCheckbox = document.getElementById('aspectRatio');
+const ditheringCheckbox = document.getElementById('dithering');
 const gridValue = document.getElementById('gridValue');
 const scaleValue = document.getElementById('scaleValue');
 const colorValue = document.getElementById('colorValue');
@@ -99,6 +100,7 @@ function render() {
     const scale = parseInt(scaleSlider.value);
     const colorCount = parseInt(colorSlider.value);
     const preserveAspectRatio = aspectRatioCheckbox.checked;
+    const enableDithering = ditheringCheckbox.checked;
 
     // Calculate grid dimensions
     let gw, gh;
@@ -125,8 +127,8 @@ function render() {
     workCtx.imageSmoothingEnabled = true;
     workCtx.drawImage(currentImage, 0, 0, gw, gh);
 
-    // Apply color reduction (posterize)
-    applyPosterize(colorCount);
+    // Apply palette-based color reduction
+    applyPaletteQuantization(colorCount, enableDithering);
 
     // Set output canvas dimensions
     outCanvas.width = gw * scale;
@@ -137,22 +139,156 @@ function render() {
     outCtx.drawImage(workCanvas, 0, 0, gw, gh, 0, 0, gw * scale, gh * scale);
 }
 
-// Posterize color reduction algorithm
-function applyPosterize(colorCount) {
+// Median Cut Quantization - builds a palette of N colors
+function medianCutQuantization(imageData, maxColors) {
+    const pixels = [];
+    const data = imageData.data;
+
+    // Collect all unique colors
+    for (let i = 0; i < data.length; i += 4) {
+        pixels.push([data[i], data[i + 1], data[i + 2]]);
+    }
+
+    // Recursively split color space
+    function splitBucket(bucket, depth) {
+        if (depth === 0 || bucket.length <= 1) {
+            // Calculate average color for this bucket
+            const avg = [0, 0, 0];
+            for (const pixel of bucket) {
+                avg[0] += pixel[0];
+                avg[1] += pixel[1];
+                avg[2] += pixel[2];
+            }
+            return [[
+                Math.round(avg[0] / bucket.length),
+                Math.round(avg[1] / bucket.length),
+                Math.round(avg[2] / bucket.length)
+            ]];
+        }
+
+        // Find channel with greatest range
+        const ranges = [0, 1, 2].map(channel => {
+            const values = bucket.map(p => p[channel]);
+            return Math.max(...values) - Math.min(...values);
+        });
+        const channel = ranges.indexOf(Math.max(...ranges));
+
+        // Sort by the channel with greatest range
+        bucket.sort((a, b) => a[channel] - b[channel]);
+
+        // Split in half
+        const mid = Math.floor(bucket.length / 2);
+        const left = bucket.slice(0, mid);
+        const right = bucket.slice(mid);
+
+        return [
+            ...splitBucket(left, depth - 1),
+            ...splitBucket(right, depth - 1)
+        ];
+    }
+
+    const depth = Math.ceil(Math.log2(maxColors));
+    return splitBucket(pixels, depth).slice(0, maxColors);
+}
+
+// Find nearest color in palette
+function findNearestColor(pixel, palette) {
+    let minDist = Infinity;
+    let nearest = palette[0];
+
+    for (const color of palette) {
+        const dr = pixel[0] - color[0];
+        const dg = pixel[1] - color[1];
+        const db = pixel[2] - color[2];
+        const dist = dr * dr + dg * dg + db * db;
+
+        if (dist < minDist) {
+            minDist = dist;
+            nearest = color;
+        }
+    }
+
+    return nearest;
+}
+
+// Floyd-Steinberg Dithering
+function applyDithering(imageData, palette) {
+    const data = imageData.data;
+    const width = imageData.width;
+    const height = imageData.height;
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+
+            const oldPixel = [data[i], data[i + 1], data[i + 2]];
+            const newPixel = findNearestColor(oldPixel, palette);
+
+            data[i] = newPixel[0];
+            data[i + 1] = newPixel[1];
+            data[i + 2] = newPixel[2];
+
+            // Calculate error
+            const errR = oldPixel[0] - newPixel[0];
+            const errG = oldPixel[1] - newPixel[1];
+            const errB = oldPixel[2] - newPixel[2];
+
+            // Distribute error to neighboring pixels
+            // Right pixel (x+1, y)
+            if (x + 1 < width) {
+                const idx = i + 4;
+                data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 7 / 16));
+                data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 7 / 16));
+                data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 7 / 16));
+            }
+
+            // Bottom-left pixel (x-1, y+1)
+            if (x > 0 && y + 1 < height) {
+                const idx = ((y + 1) * width + (x - 1)) * 4;
+                data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 3 / 16));
+                data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 3 / 16));
+                data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 3 / 16));
+            }
+
+            // Bottom pixel (x, y+1)
+            if (y + 1 < height) {
+                const idx = ((y + 1) * width + x) * 4;
+                data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 5 / 16));
+                data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 5 / 16));
+                data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 5 / 16));
+            }
+
+            // Bottom-right pixel (x+1, y+1)
+            if (x + 1 < width && y + 1 < height) {
+                const idx = ((y + 1) * width + (x + 1)) * 4;
+                data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 1 / 16));
+                data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 1 / 16));
+                data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 1 / 16));
+            }
+        }
+    }
+}
+
+// Apply palette quantization with optional dithering
+function applyPaletteQuantization(colorCount, enableDithering) {
     const imageData = workCtx.getImageData(0, 0, workCanvas.width, workCanvas.height);
     const data = imageData.data;
 
-    // Calculate step size for posterization
-    const steps = Math.max(2, colorCount);
-    const stepSize = 255 / (steps - 1);
+    // Generate palette using median cut
+    const palette = medianCutQuantization(imageData, Math.max(2, colorCount));
 
-    // Process each pixel
-    for (let i = 0; i < data.length; i += 4) {
-        // Posterize each color channel
-        data[i] = Math.round(data[i] / stepSize) * stepSize;     // Red
-        data[i + 1] = Math.round(data[i + 1] / stepSize) * stepSize; // Green
-        data[i + 2] = Math.round(data[i + 2] / stepSize) * stepSize; // Blue
-        // Alpha channel (data[i + 3]) remains unchanged
+    if (enableDithering) {
+        // Apply Floyd-Steinberg dithering
+        applyDithering(imageData, palette);
+    } else {
+        // Simple nearest color mapping without dithering
+        for (let i = 0; i < data.length; i += 4) {
+            const pixel = [data[i], data[i + 1], data[i + 2]];
+            const nearest = findNearestColor(pixel, palette);
+            data[i] = nearest[0];
+            data[i + 1] = nearest[1];
+            data[i + 2] = nearest[2];
+        }
     }
 
     // Write modified pixel data back
@@ -180,3 +316,4 @@ gridSlider.addEventListener('input', render);
 scaleSlider.addEventListener('input', render);
 colorSlider.addEventListener('input', render);
 aspectRatioCheckbox.addEventListener('change', render);
+ditheringCheckbox.addEventListener('change', render);
