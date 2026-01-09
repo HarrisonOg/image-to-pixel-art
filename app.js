@@ -6,6 +6,7 @@ const scaleSlider = document.getElementById('scaleSlider');
 const colorSlider = document.getElementById('colorSlider');
 const aspectRatioCheckbox = document.getElementById('aspectRatio');
 const ditheringCheckbox = document.getElementById('dithering');
+const downscaleModeRadios = document.querySelectorAll('input[name="downscaleMode"]');
 const gridValue = document.getElementById('gridValue');
 const scaleValue = document.getElementById('scaleValue');
 const colorValue = document.getElementById('colorValue');
@@ -22,6 +23,35 @@ const outCtx = outCanvas.getContext('2d');
 
 // Global state
 let currentImage = null;
+let worker = null;
+let renderTimeout = null;
+
+// Initialize Web Worker
+try {
+    worker = new Worker('worker.js');
+    worker.onmessage = function(e) {
+        const { imageData } = e.data;
+        workCtx.putImageData(imageData, 0, 0);
+
+        // Upscale to output canvas
+        const scale = parseInt(scaleSlider.value);
+        outCanvas.width = imageData.width * scale;
+        outCanvas.height = imageData.height * scale;
+        outCtx.imageSmoothingEnabled = false;
+        outCtx.drawImage(workCanvas, 0, 0, imageData.width, imageData.height,
+                         0, 0, imageData.width * scale, imageData.height * scale);
+    };
+} catch (e) {
+    console.warn('Web Worker not available, using main thread fallback');
+}
+
+// Debounce function for performance
+function debounce(func, wait) {
+    return function executedFunction(...args) {
+        clearTimeout(renderTimeout);
+        renderTimeout = setTimeout(() => func(...args), wait);
+    };
+}
 
 // Update slider value displays
 gridSlider.addEventListener('input', () => {
@@ -101,6 +131,7 @@ function render() {
     const colorCount = parseInt(colorSlider.value);
     const preserveAspectRatio = aspectRatioCheckbox.checked;
     const enableDithering = ditheringCheckbox.checked;
+    const downscaleMode = document.querySelector('input[name="downscaleMode"]:checked').value;
 
     // Calculate grid dimensions
     let gw, gh;
@@ -124,20 +155,22 @@ function render() {
     // Set work canvas dimensions and draw image
     workCanvas.width = gw;
     workCanvas.height = gh;
-    workCtx.imageSmoothingEnabled = true;
+
+    // Apply downscale mode
+    if (downscaleMode === 'sharp') {
+        workCtx.imageSmoothingEnabled = false;
+    } else {
+        workCtx.imageSmoothingEnabled = true;
+    }
+
     workCtx.drawImage(currentImage, 0, 0, gw, gh);
 
     // Apply palette-based color reduction
     applyPaletteQuantization(colorCount, enableDithering);
-
-    // Set output canvas dimensions
-    outCanvas.width = gw * scale;
-    outCanvas.height = gh * scale;
-
-    // Draw to output canvas with nearest-neighbor scaling
-    outCtx.imageSmoothingEnabled = false;
-    outCtx.drawImage(workCanvas, 0, 0, gw, gh, 0, 0, gw * scale, gh * scale);
 }
+
+// Debounced render function for sliders
+const debouncedRender = debounce(render, 50);
 
 // Median Cut Quantization - builds a palette of N colors
 function medianCutQuantization(imageData, maxColors) {
@@ -272,27 +305,50 @@ function applyDithering(imageData, palette) {
 // Apply palette quantization with optional dithering
 function applyPaletteQuantization(colorCount, enableDithering) {
     const imageData = workCtx.getImageData(0, 0, workCanvas.width, workCanvas.height);
-    const data = imageData.data;
 
-    // Generate palette using median cut
-    const palette = medianCutQuantization(imageData, Math.max(2, colorCount));
+    // Use Web Worker if available for better performance
+    if (worker) {
+        // Clone the image data for transfer to worker
+        const clonedData = new Uint8ClampedArray(imageData.data);
+        const clonedImageData = new ImageData(clonedData, imageData.width, imageData.height);
 
-    if (enableDithering) {
-        // Apply Floyd-Steinberg dithering
-        applyDithering(imageData, palette);
+        worker.postMessage({
+            imageData: clonedImageData,
+            colorCount: Math.max(2, colorCount),
+            enableDithering
+        }, [clonedData.buffer]);
     } else {
-        // Simple nearest color mapping without dithering
-        for (let i = 0; i < data.length; i += 4) {
-            const pixel = [data[i], data[i + 1], data[i + 2]];
-            const nearest = findNearestColor(pixel, palette);
-            data[i] = nearest[0];
-            data[i + 1] = nearest[1];
-            data[i + 2] = nearest[2];
-        }
-    }
+        // Fallback to main thread processing
+        const data = imageData.data;
 
-    // Write modified pixel data back
-    workCtx.putImageData(imageData, 0, 0);
+        // Generate palette using median cut
+        const palette = medianCutQuantization(imageData, Math.max(2, colorCount));
+
+        if (enableDithering) {
+            // Apply Floyd-Steinberg dithering
+            applyDithering(imageData, palette);
+        } else {
+            // Simple nearest color mapping without dithering
+            for (let i = 0; i < data.length; i += 4) {
+                const pixel = [data[i], data[i + 1], data[i + 2]];
+                const nearest = findNearestColor(pixel, palette);
+                data[i] = nearest[0];
+                data[i + 1] = nearest[1];
+                data[i + 2] = nearest[2];
+            }
+        }
+
+        // Write modified pixel data back
+        workCtx.putImageData(imageData, 0, 0);
+
+        // Upscale to output canvas
+        const scale = parseInt(scaleSlider.value);
+        outCanvas.width = imageData.width * scale;
+        outCanvas.height = imageData.height * scale;
+        outCtx.imageSmoothingEnabled = false;
+        outCtx.drawImage(workCanvas, 0, 0, imageData.width, imageData.height,
+                         0, 0, imageData.width * scale, imageData.height * scale);
+    }
 }
 
 // Download small (grid size) version
@@ -312,8 +368,17 @@ downloadScaled.addEventListener('click', () => {
 });
 
 // Re-render when controls change
-gridSlider.addEventListener('input', render);
+// Use debounced render for sliders to improve performance
+gridSlider.addEventListener('input', debouncedRender);
+colorSlider.addEventListener('input', debouncedRender);
+
+// No debounce for scale slider (it's just upscaling, not heavy processing)
 scaleSlider.addEventListener('input', render);
-colorSlider.addEventListener('input', render);
+
+// No debounce for checkboxes and radio buttons
 aspectRatioCheckbox.addEventListener('change', render);
 ditheringCheckbox.addEventListener('change', render);
+
+downscaleModeRadios.forEach(radio => {
+    radio.addEventListener('change', render);
+});
