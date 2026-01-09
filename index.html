@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image to Pixel Art Converter</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Image to Pixel Art</h1>
+        <p class="subtitle">Convert your images into beautiful pixel art</p>
+
+        <div class="upload-section" id="uploadSection">
+            <input type="file" id="fileInput" accept="image/*">
+            <label for="fileInput" class="upload-label">Click to upload or drag and drop an image</label>
+            <p class="upload-hint">Supports JPG, PNG, WebP, and other image formats</p>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <div class="control-row">
+                    <label for="gridSlider">Grid Size:</label>
+                    <input type="range" id="gridSlider" min="8" max="256" value="32" step="4">
+                    <span class="value-display" id="gridValue">32</span>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <div class="control-row">
+                    <label for="scaleSlider">Preview Scale:</label>
+                    <input type="range" id="scaleSlider" min="4" max="24" value="8" step="1">
+                    <span class="value-display" id="scaleValue">8x</span>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <div class="control-row">
+                    <label for="colorSlider">Color Count:</label>
+                    <input type="range" id="colorSlider" min="2" max="64" value="32" step="2">
+                    <span class="value-display" id="colorValue">32</span>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <div class="control-row">
+                    <label for="aspectRatio">Preserve Aspect Ratio:</label>
+                    <input type="checkbox" id="aspectRatio" checked>
+                </div>
+            </div>
+        </div>
+
+        <div class="canvas-section" id="canvasSection">
+            <canvas id="workCanvas"></canvas>
+            <canvas id="outCanvas"></canvas>
+            <div class="placeholder" id="placeholder">Your pixel art will appear here</div>
+        </div>
+
+        <div class="download-section" id="downloadSection">
+            <button class="btn-primary" id="downloadSmall">Download Small (Grid Size)</button>
+            <button class="btn-secondary" id="downloadScaled">Download Scaled (Preview Size)</button>
+        </div>
+
+        <div class="info">
+            <strong>How to use:</strong> Upload an image, adjust the grid size for pixelation level, change the color count for stylization, and download your pixel art!
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
