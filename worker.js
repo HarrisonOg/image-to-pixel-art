@@ -121,8 +121,7 @@ function applyDithering(data, width, height, palette) {
 
 // Message handler
 self.onmessage = function(e) {
-    const { imageData, colorCount, enableDithering } = e.data;
-    const { data, width, height } = imageData;
+    const { data, width, height, colorCount, enableDithering } = e.data;
 
     // Collect all pixels
     const pixels = [];
@@ -147,6 +146,7 @@ self.onmessage = function(e) {
         }
     }
 
-    // Send processed image data back
-    self.postMessage({ imageData }, [imageData.data.buffer]);
+    // Create ImageData from processed buffer and send back
+    const imageData = new ImageData(data, width, height);
+    self.postMessage({ imageData }, [data.buffer]);
 };

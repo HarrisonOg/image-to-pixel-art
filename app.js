@@ -26,9 +26,145 @@ let currentImage = null;
 let worker = null;
 let renderTimeout = null;
 
-// Initialize Web Worker
+// Initialize Web Worker (inline to avoid file:// protocol issues)
 try {
-    worker = new Worker('worker.js');
+    const workerCode = `
+        // Median Cut Quantization
+        function medianCutQuantization(pixels, maxColors) {
+            function splitBucket(bucket, depth) {
+                if (depth === 0 || bucket.length <= 1) {
+                    const avg = [0, 0, 0];
+                    for (const pixel of bucket) {
+                        avg[0] += pixel[0];
+                        avg[1] += pixel[1];
+                        avg[2] += pixel[2];
+                    }
+                    return [[
+                        Math.round(avg[0] / bucket.length),
+                        Math.round(avg[1] / bucket.length),
+                        Math.round(avg[2] / bucket.length)
+                    ]];
+                }
+
+                const ranges = [0, 1, 2].map(channel => {
+                    const values = bucket.map(p => p[channel]);
+                    return Math.max(...values) - Math.min(...values);
+                });
+                const channel = ranges.indexOf(Math.max(...ranges));
+
+                bucket.sort((a, b) => a[channel] - b[channel]);
+
+                const mid = Math.floor(bucket.length / 2);
+                const left = bucket.slice(0, mid);
+                const right = bucket.slice(mid);
+
+                return [
+                    ...splitBucket(left, depth - 1),
+                    ...splitBucket(right, depth - 1)
+                ];
+            }
+
+            const depth = Math.ceil(Math.log2(maxColors));
+            return splitBucket(pixels, depth).slice(0, maxColors);
+        }
+
+        function findNearestColor(pixel, palette) {
+            let minDist = Infinity;
+            let nearest = palette[0];
+
+            for (const color of palette) {
+                const dr = pixel[0] - color[0];
+                const dg = pixel[1] - color[1];
+                const db = pixel[2] - color[2];
+                const dist = dr * dr + dg * dg + db * db;
+
+                if (dist < minDist) {
+                    minDist = dist;
+                    nearest = color;
+                }
+            }
+
+            return nearest;
+        }
+
+        function applyDithering(data, width, height, palette) {
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const i = (y * width + x) * 4;
+
+                    const oldPixel = [data[i], data[i + 1], data[i + 2]];
+                    const newPixel = findNearestColor(oldPixel, palette);
+
+                    data[i] = newPixel[0];
+                    data[i + 1] = newPixel[1];
+                    data[i + 2] = newPixel[2];
+
+                    const errR = oldPixel[0] - newPixel[0];
+                    const errG = oldPixel[1] - newPixel[1];
+                    const errB = oldPixel[2] - newPixel[2];
+
+                    if (x + 1 < width) {
+                        const idx = i + 4;
+                        data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 7 / 16));
+                        data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 7 / 16));
+                        data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 7 / 16));
+                    }
+
+                    if (x > 0 && y + 1 < height) {
+                        const idx = ((y + 1) * width + (x - 1)) * 4;
+                        data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 3 / 16));
+                        data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 3 / 16));
+                        data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 3 / 16));
+                    }
+
+                    if (y + 1 < height) {
+                        const idx = ((y + 1) * width + x) * 4;
+                        data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 5 / 16));
+                        data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 5 / 16));
+                        data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 5 / 16));
+                    }
+
+                    if (x + 1 < width && y + 1 < height) {
+                        const idx = ((y + 1) * width + (x + 1)) * 4;
+                        data[idx] = Math.min(255, Math.max(0, data[idx] + errR * 1 / 16));
+                        data[idx + 1] = Math.min(255, Math.max(0, data[idx + 1] + errG * 1 / 16));
+                        data[idx + 2] = Math.min(255, Math.max(0, data[idx + 2] + errB * 1 / 16));
+                    }
+                }
+            }
+        }
+
+        self.onmessage = function(e) {
+            const { data, width, height, colorCount, enableDithering } = e.data;
+
+            const pixels = [];
+            for (let i = 0; i < data.length; i += 4) {
+                pixels.push([data[i], data[i + 1], data[i + 2]]);
+            }
+
+            const palette = medianCutQuantization(pixels, Math.max(2, colorCount));
+
+            if (enableDithering) {
+                applyDithering(data, width, height, palette);
+            } else {
+                for (let i = 0; i < data.length; i += 4) {
+                    const pixel = [data[i], data[i + 1], data[i + 2]];
+                    const nearest = findNearestColor(pixel, palette);
+                    data[i] = nearest[0];
+                    data[i + 1] = nearest[1];
+                    data[i + 2] = nearest[2];
+                }
+            }
+
+            const imageData = new ImageData(data, width, height);
+            self.postMessage({ imageData }, [data.buffer]);
+        };
+    `;
+
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const workerUrl = URL.createObjectURL(blob);
+    worker = new Worker(workerUrl);
+
     worker.onmessage = function(e) {
         const { imageData } = e.data;
         workCtx.putImageData(imageData, 0, 0);
@@ -308,15 +444,16 @@ function applyPaletteQuantization(colorCount, enableDithering) {
 
     // Use Web Worker if available for better performance
     if (worker) {
-        // Clone the image data for transfer to worker
-        const clonedData = new Uint8ClampedArray(imageData.data);
-        const clonedImageData = new ImageData(clonedData, imageData.width, imageData.height);
+        // Send data, width, and height separately for proper transfer
+        const dataBuffer = new Uint8ClampedArray(imageData.data);
 
         worker.postMessage({
-            imageData: clonedImageData,
+            data: dataBuffer,
+            width: imageData.width,
+            height: imageData.height,
             colorCount: Math.max(2, colorCount),
             enableDithering
-        }, [clonedData.buffer]);
+        }, [dataBuffer.buffer]);
     } else {
         // Fallback to main thread processing
         const data = imageData.data;
