@@ -16,6 +16,10 @@ const placeholder = document.getElementById('placeholder');
 const downloadSection = document.getElementById('downloadSection');
 const downloadSmall = document.getElementById('downloadSmall');
 const downloadScaled = document.getElementById('downloadScaled');
+const copyToClipboard = document.getElementById('copyToClipboard');
+const exportPalette = document.getElementById('exportPalette');
+const paletteSection = document.getElementById('paletteSection');
+const paletteDisplay = document.getElementById('paletteDisplay');
 
 // Canvas contexts
 const workCtx = workCanvas.getContext('2d', { willReadFrequently: true });
@@ -25,6 +29,7 @@ const outCtx = outCanvas.getContext('2d');
 let currentImage = null;
 let worker = null;
 let renderTimeout = null;
+let currentPalette = [];
 
 // Initialize Web Worker (inline to avoid file:// protocol issues)
 try {
@@ -157,7 +162,7 @@ try {
             }
 
             const imageData = new ImageData(data, width, height);
-            self.postMessage({ imageData }, [data.buffer]);
+            self.postMessage({ imageData, palette }, [data.buffer]);
         };
     `;
 
@@ -166,8 +171,12 @@ try {
     worker = new Worker(workerUrl);
 
     worker.onmessage = function(e) {
-        const { imageData } = e.data;
+        const { imageData, palette } = e.data;
         workCtx.putImageData(imageData, 0, 0);
+
+        // Store palette globally
+        currentPalette = palette;
+        displayPalette(palette);
 
         // Upscale to output canvas
         const scale = parseInt(scaleSlider.value);
@@ -461,6 +470,10 @@ function applyPaletteQuantization(colorCount, enableDithering) {
         // Generate palette using median cut
         const palette = medianCutQuantization(imageData, Math.max(2, colorCount));
 
+        // Store palette globally
+        currentPalette = palette;
+        displayPalette(palette);
+
         if (enableDithering) {
             // Apply Floyd-Steinberg dithering
             applyDithering(imageData, palette);
@@ -519,3 +532,147 @@ ditheringCheckbox.addEventListener('change', render);
 downscaleModeRadios.forEach(radio => {
     radio.addEventListener('change', render);
 });
+
+// ============ Phase 6: Productization Features ============
+
+// LocalStorage: Save settings
+function saveSettings() {
+    const settings = {
+        gridSize: gridSlider.value,
+        scale: scaleSlider.value,
+        colorCount: colorSlider.value,
+        aspectRatio: aspectRatioCheckbox.checked,
+        dithering: ditheringCheckbox.checked,
+        downscaleMode: document.querySelector('input[name="downscaleMode"]:checked').value
+    };
+    localStorage.setItem('pixelArtSettings', JSON.stringify(settings));
+}
+
+// LocalStorage: Load settings
+function loadSettings() {
+    const saved = localStorage.getItem('pixelArtSettings');
+    if (saved) {
+        try {
+            const settings = JSON.parse(saved);
+            gridSlider.value = settings.gridSize || 32;
+            scaleSlider.value = settings.scale || 8;
+            colorSlider.value = settings.colorCount || 32;
+            aspectRatioCheckbox.checked = settings.aspectRatio !== false;
+            ditheringCheckbox.checked = settings.dithering || false;
+
+            const downscaleMode = settings.downscaleMode || 'smooth';
+            document.querySelector(`input[name="downscaleMode"][value="${downscaleMode}"]`).checked = true;
+
+            // Update displays
+            gridValue.textContent = gridSlider.value;
+            scaleValue.textContent = scaleSlider.value + 'x';
+            colorValue.textContent = colorSlider.value;
+        } catch (e) {
+            console.warn('Failed to load settings:', e);
+        }
+    }
+}
+
+// Display palette visually
+function displayPalette(palette) {
+    if (!palette || palette.length === 0) return;
+
+    paletteDisplay.innerHTML = '';
+    paletteSection.classList.add('active');
+
+    palette.forEach(color => {
+        const colorDiv = document.createElement('div');
+        colorDiv.className = 'palette-color';
+        const hex = rgbToHex(color[0], color[1], color[2]);
+        colorDiv.style.backgroundColor = hex;
+
+        const tooltip = document.createElement('span');
+        tooltip.className = 'palette-color-tooltip';
+        tooltip.textContent = hex;
+        colorDiv.appendChild(tooltip);
+
+        // Copy hex to clipboard on click
+        colorDiv.addEventListener('click', () => {
+            navigator.clipboard.writeText(hex).then(() => {
+                tooltip.textContent = 'Copied!';
+                setTimeout(() => {
+                    tooltip.textContent = hex;
+                }, 1000);
+            });
+        });
+
+        paletteDisplay.appendChild(colorDiv);
+    });
+}
+
+// Convert RGB to Hex
+function rgbToHex(r, g, b) {
+    return '#' + [r, g, b].map(x => {
+        const hex = Math.round(x).toString(16);
+        return hex.length === 1 ? '0' + hex : hex;
+    }).join('');
+}
+
+// Copy canvas to clipboard
+copyToClipboard.addEventListener('click', async () => {
+    try {
+        const blob = await new Promise(resolve => outCanvas.toBlob(resolve, 'image/png'));
+        await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blob })
+        ]);
+
+        const originalText = copyToClipboard.textContent;
+        copyToClipboard.textContent = 'Copied!';
+        setTimeout(() => {
+            copyToClipboard.textContent = originalText;
+        }, 2000);
+    } catch (err) {
+        console.error('Failed to copy to clipboard:', err);
+        alert('Failed to copy to clipboard. Your browser may not support this feature.');
+    }
+});
+
+// Export palette as JSON
+exportPalette.addEventListener('click', () => {
+    if (currentPalette.length === 0) {
+        alert('No palette available. Please process an image first.');
+        return;
+    }
+
+    const paletteData = {
+        name: 'Pixel Art Palette',
+        colors: currentPalette.map(color => ({
+            rgb: color,
+            hex: rgbToHex(color[0], color[1], color[2])
+        })),
+        metadata: {
+            colorCount: currentPalette.length,
+            createdAt: new Date().toISOString(),
+            generator: 'Image to Pixel Art Converter'
+        }
+    };
+
+    const json = JSON.stringify(paletteData, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.download = `palette-${currentPalette.length}-colors.json`;
+    link.href = url;
+    link.click();
+
+    URL.revokeObjectURL(url);
+});
+
+// Save settings when controls change
+gridSlider.addEventListener('change', saveSettings);
+scaleSlider.addEventListener('change', saveSettings);
+colorSlider.addEventListener('change', saveSettings);
+aspectRatioCheckbox.addEventListener('change', saveSettings);
+ditheringCheckbox.addEventListener('change', saveSettings);
+downscaleModeRadios.forEach(radio => {
+    radio.addEventListener('change', saveSettings);
+});
+
+// Load settings on page load
+loadSettings();
